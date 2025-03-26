@@ -1,0 +1,14 @@
+# Translational stiffness and damping parameters
+float64[] cartesian_stiffness  # [x, y, z] stiffness values
+float64[] cartesian_damping   # [x, y, z] damping values
+
+# Rotational stiffness and damping parameters
+float64[] rotational_stiffness  # [roll, pitch, yaw] stiffness values
+float64[] rotational_damping   # [roll, pitch, yaw] damping values
+
+bool use_null_space_control     # Whether to enable null space control
+float64[] null_space_stiffness  # Joint stiffness for null space control
+float64[] null_space_damping    # Joint damping for null space control
+---
+bool success
+string message 

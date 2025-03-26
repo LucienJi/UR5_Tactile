@@ -1,0 +1,12 @@
+# Command type: 
+# 0 = open, 1 = close, 
+# 2 = set position (0-255), 
+# 3 = set force (0-255)
+int32 command_type
+# Value to use for position or force (if applicable)
+int32 value
+# Gripper mode: 0 = basic, 1 = wide, 2 = pinch, 3 = scissor
+int32 gripper_mode
+---
+bool success
+string message 

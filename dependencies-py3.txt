@@ -1,0 +1,34 @@
+# LIST YOUR PYTHON3 PACKAGES HERE
+scipy
+#torch
+#torchvision
+pyquaternion
+pyyaml
+rospkg
+pexpect
+opencv-python
+matplotlib
+einops
+packaging
+#h5py
+ipython
+wandb
+mediapy
+omega
+hydra-core
+pupil-apriltags
+pyserial
+pygame
+h5py
+# ROS with conda
+catkin_pkg
+empy
+#pyyaml
+
+
+torch>=1.9.0
+torchvision>=0.10.0
+numpy>=1.19.2
+h5py>=3.1.0
+tqdm>=4.62.3
+torchinfo>=1.7.0

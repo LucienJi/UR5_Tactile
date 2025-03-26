@@ -1,0 +1,6 @@
+# LIST YOUR APT PACKAGES HERE
+ros-noetic-cartesian-control-msgs
+
+# Debug utils
+iputils-ping
+x11-apps
