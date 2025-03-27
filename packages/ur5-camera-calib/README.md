@@ -87,12 +87,15 @@ Options:
 - `--save-layout`: Save the camera layout (mapping between serials and names)
 - `--layout-name`: Name for the layout file (default: "camera_layout")
 - `--width`, `--height`, `--fps`: Camera resolution and frame rate
+- `--no-multiprocessing`: Disable multiprocessing (use single thread for all cameras)
+- `--publishing-fps`: Frame publishing rate in Hz (default: 30)
 
 This script:
 - Discovers all connected RealSense cameras
 - Initializes and starts them with consistent topic naming
 - Optionally helps you identify each camera and give it a meaningful name
 - Publishes all camera streams to ROS topics using the serial number for topic naming
+- Uses multiprocessing by default for better synchronization between cameras
 
 #### 5. Identifying Cameras
 
@@ -138,6 +141,24 @@ To avoid confusion when working with multiple cameras, use the following workflo
 3. **Accessing Camera Streams**:
    - Each camera publishes to topics using its serial number: `/camera/SERIAL/color/image_raw`
    - Use the saved layout file to map between camera names and topic paths in your code
+
+## Multiprocessing Support
+
+The camera management system uses multiprocessing to improve synchronization between multiple cameras:
+
+- Each camera runs in its own dedicated process
+- All images from a single camera are timestamped simultaneously
+- Camera processes operate independently, preventing one slow camera from affecting others
+- Performance scales better with multiple cameras on multi-core systems
+- Each process publishes its own topics at the specified FPS
+
+Benefits of the multiprocessing approach:
+- Better frame synchronization across cameras
+- More efficient CPU utilization
+- No blocking/delays when one camera has issues
+- Improved reliability for multi-camera setups
+
+To disable multiprocessing (e.g., for debugging), use the `--no-multiprocessing` flag when launching cameras.
 
 ## Output
 

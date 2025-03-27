@@ -2,7 +2,7 @@
 # 获取最新镜像 ID，优先使用标签为 latest-amd64 的镜像
 rosnode kill /husky_node
 
-REPO="ripl/ur5-tactile"
+REPO="lucienji/ur5_tactile"
 
 # 检查是否提供了容器名称参数
 if [ -z "$1" ]; then
@@ -12,7 +12,8 @@ else
 fi
 
 # 尝试使用指定标签获取镜像 ID
-IMAGE_ID=$(docker images --filter=reference="${REPO}:latest-amd64" --format '{{.ID}}')
+# IMAGE_ID=$(docker images --filter=reference="${REPO}:latest-amd64" --format '{{.ID}}')
+IMAGE_ID=$(docker images --filter=reference="${REPO}:master-amd64" --format '{{.ID}}')
 
 # 如果未找到，则根据创建时间排序选择最新的镜像
 if [ -z "$IMAGE_ID" ]; then
@@ -30,7 +31,7 @@ echo "Using image ID: $IMAGE_ID"
 docker run --rm --name "$CONTAINER_NAME" \
   --gpus all \
   --net=host \
-  --device /dev/ttyACM0:/dev/ttyACM0 \
+  --privileged \
   -v "$(pwd)":/code/src/ur5-tactile \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   --env=DISPLAY=$DISPLAY \
@@ -44,6 +45,6 @@ docker run --rm --name "$CONTAINER_NAME" \
     source ~/.bashrc; \
     exec bash"
 
-
+# --device /dev/ttyACM0:/dev/ttyACM0 \
 
 

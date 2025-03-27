@@ -24,11 +24,3 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
-catkin_install_python(PROGRAMS
-  scripts/intrinsic_calibration.py
-  scripts/major_camera_calibration.py
-  scripts/movable_camera_calibration.py
-  scripts/launch_cameras.py
-  scripts/identify_cameras.py
-  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-) 

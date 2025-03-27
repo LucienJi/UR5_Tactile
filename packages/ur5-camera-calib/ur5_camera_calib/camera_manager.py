@@ -11,6 +11,9 @@ import numpy as np
 import yaml
 import rospy
 import threading
+import multiprocessing
+import time
+import signal
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 import pyrealsense2 as rs
@@ -113,6 +116,166 @@ class CameraIdentifier:
         cv2.destroyWindow(window_name)
 
 
+def camera_publisher_process(camera_config, namespace="camera", fps=30):
+    """
+    Process function for publishing camera frames.
+    
+    Args:
+        camera_config (dict): Configuration for the camera process
+        namespace (str): Base namespace for camera topics
+        fps (int): Frames per second for publishing
+    """
+    # Extract configuration
+    serial = camera_config['serial']
+    width = camera_config.get('width', 640)
+    height = camera_config.get('height', 480)
+    camera_fps = camera_config.get('fps', 30)
+    camera_info_data = camera_config.get('camera_info', None)
+    
+    # Set process name for easier identification
+    process_name = f"camera_pub_{serial}"
+    try:
+        # In Python 3.x we can set the process name
+        multiprocessing.current_process().name = process_name
+    except:
+        pass
+    
+    # Initialize ROS node within the process
+    unique_node_name = f"camera_publisher_{serial}_{os.getpid()}"
+    rospy.init_node(unique_node_name, anonymous=True)
+    
+    # Initialize camera
+    try:
+        camera = RealSenseCamera(
+            serial_number=serial,
+            width=width,
+            height=height,
+            fps=camera_fps
+        )
+        
+        # Start camera
+        camera.start()
+        rospy.loginfo(f"Started camera {serial} in dedicated process")
+        
+        # Set up publishers
+        bridge = CvBridge()
+        camera_ns = f"{namespace}/{serial}"
+        color_pub = rospy.Publisher(f"{camera_ns}/color/image_raw", Image, queue_size=10)
+        depth_pub = rospy.Publisher(f"{camera_ns}/depth/image_raw", Image, queue_size=10)
+        info_pub = rospy.Publisher(f"{camera_ns}/color/camera_info", CameraInfo, queue_size=10)
+        
+        # Create camera info message if available
+        camera_info_msg = None
+        if camera_info_data:
+            camera_info_msg = _create_camera_info_msg(serial, camera_info_data)
+        
+        # Publishing loop
+        rate = rospy.Rate(fps)
+        
+        # Handle process termination gracefully
+        def handle_sigterm(signum, frame):
+            rospy.loginfo(f"Camera {serial} process received terminate signal")
+            camera.stop()
+            rospy.signal_shutdown("Process terminated")
+        
+        signal.signal(signal.SIGTERM, handle_sigterm)
+        
+        last_diagnostics_time = time.time()
+        frame_count = 0
+        
+        while not rospy.is_shutdown():
+            try:
+                # Get frames
+                color_img, depth_img = camera.get_frames()
+                
+                # Create timestamp (all messages use same timestamp for synchronization)
+                stamp = rospy.Time.now()
+                
+                # Convert and publish color image
+                color_msg = bridge.cv2_to_imgmsg(color_img, encoding="bgr8")
+                color_msg.header.stamp = stamp
+                color_msg.header.frame_id = f"camera_{serial}_color_optical_frame"
+                color_pub.publish(color_msg)
+                
+                # Convert and publish depth image
+                depth_msg = bridge.cv2_to_imgmsg(depth_img, encoding="passthrough")
+                depth_msg.header.stamp = stamp
+                depth_msg.header.frame_id = f"camera_{serial}_depth_optical_frame"
+                depth_pub.publish(depth_msg)
+                
+                # Publish camera info if available
+                if camera_info_msg:
+                    camera_info_msg.header.stamp = stamp
+                    info_pub.publish(camera_info_msg)
+                
+                frame_count += 1
+                current_time = time.time()
+                
+                # Log diagnostics every 10 seconds
+                if current_time - last_diagnostics_time > 10.0:
+                    actual_fps = frame_count / (current_time - last_diagnostics_time)
+                    rospy.loginfo(f"Camera {serial} publishing at {actual_fps:.2f} FPS")
+                    last_diagnostics_time = current_time
+                    frame_count = 0
+                
+                rate.sleep()
+                
+            except Exception as e:
+                rospy.logerr(f"Error in camera {serial} process: {e}")
+                # Slow down in case of persistent errors
+                rospy.sleep(1.0)
+    
+    except Exception as e:
+        rospy.logerr(f"Failed to initialize camera {serial} in process: {e}")
+    
+    finally:
+        if 'camera' in locals():
+            try:
+                camera.stop()
+                rospy.loginfo(f"Stopped camera {serial} in process")
+            except:
+                pass
+
+
+def _create_camera_info_msg(serial, camera_info_data):
+    """Create a CameraInfo message from calibration data."""
+    msg = CameraInfo()
+    msg.header.frame_id = f"camera_{serial}_color_optical_frame"
+    
+    # Set resolution
+    if "resolution" in camera_info_data:
+        msg.width = camera_info_data["resolution"].get("width", 640)
+        msg.height = camera_info_data["resolution"].get("height", 480)
+    else:
+        msg.width = 640
+        msg.height = 480
+    
+    # Set camera matrix (K)
+    if "camera_matrix" in camera_info_data:
+        K = camera_info_data["camera_matrix"]
+        msg.K = [K[0, 0], 0, K[0, 2], 0, K[1, 1], K[1, 2], 0, 0, 1]
+    
+    # Set distortion coefficients
+    if "distortion_coefficients" in camera_info_data:
+        D = camera_info_data["distortion_coefficients"]
+        if D.size == 5:  # Most common case
+            msg.D = D.tolist()
+            msg.distortion_model = "plumb_bob"
+        else:
+            msg.D = D.tolist()
+            msg.distortion_model = "rational_polynomial"
+    
+    # Set remaining matrices with identity if not available
+    msg.R = [1, 0, 0, 0, 1, 0, 0, 0, 1]  # Rectification matrix (identity)
+    
+    # Set projection matrix (P) - use K with a 0 in the last column
+    if "camera_matrix" in camera_info_data:
+        K = camera_info_data["camera_matrix"]
+        msg.P = [K[0, 0], 0, K[0, 2], 0, 0, K[1, 1], K[1, 2], 0, 0, 0, 1, 0]
+    
+    return msg
+
+
 class CameraManager:
     """
     Manager for multiple RealSense cameras.
@@ -128,6 +291,7 @@ class CameraManager:
         self.namespace = namespace
         self.cameras = {}
         self.publishers = {}
+        self.processes = {}
         self.bridge = CvBridge()
         self.camera_info = {}
         self.extrinsics = {}
@@ -206,12 +370,14 @@ class CameraManager:
         
         return initialized
     
-    def start_cameras(self, serials=None):
+    def start_cameras(self, serials=None, use_multiprocessing=True, publishing_fps=30):
         """
         Start cameras and initialize ROS publishers.
         
         Args:
             serials (list): List of camera serials to start. If None, starts all initialized cameras.
+            use_multiprocessing (bool): Whether to use multiprocessing for publishing frames
+            publishing_fps (int): Frames per second for publishing
         
         Returns:
             list: List of started camera serials
@@ -220,32 +386,77 @@ class CameraManager:
             serials = list(self.cameras.keys())
         
         started = []
-        for serial in serials:
-            if serial not in self.cameras:
-                rospy.logwarn(f"Camera {serial} not initialized")
-                continue
+        
+        # If not using multiprocessing, use the traditional approach
+        if not use_multiprocessing:
+            for serial in serials:
+                if serial not in self.cameras:
+                    rospy.logwarn(f"Camera {serial} not initialized")
+                    continue
+                
+                try:
+                    # Start the camera
+                    self.cameras[serial].start()
+                    
+                    # Create publishers
+                    camera_ns = f"{self.namespace}/{serial}"
+                    self.publishers[serial] = {
+                        "color": rospy.Publisher(f"{camera_ns}/color/image_raw", Image, queue_size=10),
+                        "depth": rospy.Publisher(f"{camera_ns}/depth/image_raw", Image, queue_size=10),
+                        "camera_info": rospy.Publisher(f"{camera_ns}/color/camera_info", CameraInfo, queue_size=10)
+                    }
+                    
+                    # Create camera info message
+                    if serial in self.camera_info:
+                        camera_info_msg = self._create_camera_info_msg(serial)
+                        self.publishers[serial]["camera_info_msg"] = camera_info_msg
+                    
+                    started.append(serial)
+                    rospy.loginfo(f"Started camera {serial}")
+                except Exception as e:
+                    rospy.logerr(f"Failed to start camera {serial}: {e}")
             
-            try:
-                # Start the camera
-                self.cameras[serial].start()
+            return started
+        
+        # Using multiprocessing approach
+        for serial in serials:
+            if serial in self.cameras:
+                try:
+                    # Stop the camera in the main process if it was started
+                    if hasattr(self.cameras[serial], 'intrinsics') and self.cameras[serial].intrinsics is not None:
+                        self.cameras[serial].stop()
+                    
+                    # Create configuration for the camera process
+                    camera_config = {
+                        'serial': serial,
+                        'width': self.cameras[serial].width,
+                        'height': self.cameras[serial].height,
+                        'fps': self.cameras[serial].fps
+                    }
+                    
+                    # Add camera info if available
+                    if serial in self.camera_info:
+                        camera_config['camera_info'] = self.camera_info[serial]
+                    
+                    # Start a dedicated process for this camera
+                    process = multiprocessing.Process(
+                        target=camera_publisher_process,
+                        args=(camera_config, self.namespace, publishing_fps),
+                        name=f"camera_pub_{serial}"
+                    )
+                    process.daemon = True
+                    process.start()
+                    
+                    # Store the process
+                    self.processes[serial] = process
+                    
+                    started.append(serial)
+                    rospy.loginfo(f"Started camera {serial} in a dedicated process (PID: {process.pid})")
                 
-                # Create publishers
-                camera_ns = f"{self.namespace}/{serial}"
-                self.publishers[serial] = {
-                    "color": rospy.Publisher(f"{camera_ns}/color/image_raw", Image, queue_size=10),
-                    "depth": rospy.Publisher(f"{camera_ns}/depth/image_raw", Image, queue_size=10),
-                    "camera_info": rospy.Publisher(f"{camera_ns}/color/camera_info", CameraInfo, queue_size=10)
-                }
-                
-                # Create camera info message
-                if serial in self.camera_info:
-                    camera_info_msg = self._create_camera_info_msg(serial)
-                    self.publishers[serial]["camera_info_msg"] = camera_info_msg
-                
-                started.append(serial)
-                rospy.loginfo(f"Started camera {serial}")
-            except Exception as e:
-                rospy.logerr(f"Failed to start camera {serial}: {e}")
+                except Exception as e:
+                    rospy.logerr(f"Failed to start camera {serial} in a dedicated process: {e}")
+            else:
+                rospy.logwarn(f"Camera {serial} not initialized")
         
         return started
     
@@ -257,19 +468,39 @@ class CameraManager:
             serials (list): List of camera serials to stop. If None, stops all cameras.
         """
         if serials is None:
-            serials = list(self.cameras.keys())
+            serials = list(set(list(self.cameras.keys()) + list(self.processes.keys())))
         
         for serial in serials:
+            # Stop processes if running in multiprocessing mode
+            if serial in self.processes and self.processes[serial].is_alive():
+                try:
+                    rospy.loginfo(f"Terminating camera process for {serial}")
+                    self.processes[serial].terminate()
+                    self.processes[serial].join(timeout=3.0)
+                    if self.processes[serial].is_alive():
+                        rospy.logwarn(f"Camera process for {serial} did not terminate gracefully, forcing kill")
+                        # On Unix, we can send SIGKILL
+                        try:
+                            os.kill(self.processes[serial].pid, signal.SIGKILL)
+                        except:
+                            pass
+                    del self.processes[serial]
+                except Exception as e:
+                    rospy.logerr(f"Error stopping camera process for {serial}: {e}")
+            
+            # Stop camera in main process if it exists and is started
             if serial in self.cameras:
                 try:
-                    self.cameras[serial].stop()
-                    rospy.loginfo(f"Stopped camera {serial}")
+                    if hasattr(self.cameras[serial], 'intrinsics') and self.cameras[serial].intrinsics is not None:
+                        self.cameras[serial].stop()
+                        rospy.loginfo(f"Stopped camera {serial} in main process")
                 except Exception as e:
-                    rospy.logerr(f"Error stopping camera {serial}: {e}")
+                    rospy.logerr(f"Error stopping camera {serial} in main process: {e}")
     
     def publish_frames(self, serials=None):
         """
         Publish frames from cameras to ROS topics.
+        Only used when not using multiprocessing.
         
         Args:
             serials (list): List of camera serials to publish. If None, publishes all started cameras.
@@ -308,6 +539,15 @@ class CameraManager:
             
             except Exception as e:
                 rospy.logerr(f"Error publishing frames for camera {serial}: {e}")
+    
+    def are_processes_alive(self):
+        """
+        Check if camera processes are alive.
+        
+        Returns:
+            bool: True if any camera process is alive
+        """
+        return any(p.is_alive() for p in self.processes.values())
     
     def run_identification(self, serials=None):
         """
@@ -356,43 +596,7 @@ class CameraManager:
         if serial not in self.camera_info:
             return None
         
-        data = self.camera_info[serial]
-        
-        msg = CameraInfo()
-        msg.header.frame_id = f"camera_{serial}_color_optical_frame"
-        
-        # Set resolution
-        if "resolution" in data:
-            msg.width = data["resolution"].get("width", 640)
-            msg.height = data["resolution"].get("height", 480)
-        else:
-            msg.width = 640
-            msg.height = 480
-        
-        # Set camera matrix (K)
-        if "camera_matrix" in data:
-            K = data["camera_matrix"]
-            msg.K = [K[0, 0], 0, K[0, 2], 0, K[1, 1], K[1, 2], 0, 0, 1]
-        
-        # Set distortion coefficients
-        if "distortion_coefficients" in data:
-            D = data["distortion_coefficients"]
-            if D.size == 5:  # Most common case
-                msg.D = D.tolist()
-                msg.distortion_model = "plumb_bob"
-            else:
-                msg.D = D.tolist()
-                msg.distortion_model = "rational_polynomial"
-        
-        # Set remaining matrices with identity if not available
-        msg.R = [1, 0, 0, 0, 1, 0, 0, 0, 1]  # Rectification matrix (identity)
-        
-        # Set projection matrix (P) - use K with a 0 in the last column
-        if "camera_matrix" in data:
-            K = data["camera_matrix"]
-            msg.P = [K[0, 0], 0, K[0, 2], 0, 0, K[1, 1], K[1, 2], 0, 0, 0, 1, 0]
-        
-        return msg
+        return _create_camera_info_msg(serial, self.camera_info[serial])
 
 
 def save_camera_layout(cameras, layout_name="camera_layout"):

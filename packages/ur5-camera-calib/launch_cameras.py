@@ -11,8 +11,7 @@ import time
 import yaml
 import rospy
 import threading
-import signal
-from ur5_camera_calib.camera_manager import CameraManager, save_camera_layout, load_camera_layout
+from .ur5_camera_calib.camera_manager import CameraManager, save_camera_layout, load_camera_layout
 
 
 def identify_and_name_cameras(manager):
@@ -102,20 +101,6 @@ def identify_and_name_cameras(manager):
     return camera_names
 
 
-def publish_camera_frames(manager, rate=30):
-    """
-    Continuously publish camera frames at the specified rate.
-    
-    Args:
-        manager (CameraManager): Camera manager instance
-        rate (int): Publishing rate in Hz
-    """
-    rate_obj = rospy.Rate(rate)
-    while not rospy.is_shutdown():
-        manager.publish_frames()
-        rate_obj.sleep()
-
-
 def main():
     parser = argparse.ArgumentParser(description="Launch and identify multiple RealSense cameras")
     parser.add_argument("--width", type=int, default=640, help="Image width")
@@ -124,6 +109,8 @@ def main():
     parser.add_argument("--identify", action="store_true", help="Run camera identification")
     parser.add_argument("--save-layout", action="store_true", help="Save camera layout")
     parser.add_argument("--layout-name", default="camera_layout", help="Name for the camera layout")
+    parser.add_argument("--no-multiprocessing", action="store_true", help="Disable multiprocessing for camera publishing")
+    parser.add_argument("--publishing-fps", type=int, default=30, help="Frame publishing rate")
     args = parser.parse_args()
     
     # Initialize ROS node
@@ -159,19 +146,7 @@ def main():
     
     print(f"Initialized {len(initialized)} cameras")
     
-    # Start cameras
-    print("\nStarting cameras...")
-    started = manager.start_cameras(serials=initialized)
-    
-    if not started:
-        print("Failed to start any cameras!")
-        return 1
-    
-    print(f"Started {len(started)} cameras")
-    
-    # Camera naming
-    camera_names = {}
-    
+    # For identification, we'll need to use the cameras without multiprocessing
     if args.identify:
         # Run camera identification and naming
         camera_names = identify_and_name_cameras(manager)
@@ -179,9 +154,30 @@ def main():
         # Save layout if requested
         if args.save_layout and camera_names:
             save_camera_layout(camera_names, args.layout_name)
+            print(f"Camera layout saved")
     else:
         # Just load existing layout
         camera_names = load_camera_layout(args.layout_name)
+    
+    # Stop existing camera instances before starting in multiprocessing mode
+    if not args.no_multiprocessing:
+        manager.stop_cameras()
+    
+    # Start cameras
+    print("\nStarting cameras...")
+    use_multiprocessing = not args.no_multiprocessing
+    started = manager.start_cameras(
+        serials=initialized,
+        use_multiprocessing=use_multiprocessing,
+        publishing_fps=args.publishing_fps
+    )
+    
+    if not started:
+        print("Failed to start any cameras!")
+        return 1
+    
+    print(f"Started {len(started)} cameras" + 
+          (" using multiprocessing" if use_multiprocessing else " in single-process mode"))
     
     # Print camera information
     print("\n=== Camera Information ===")
@@ -194,16 +190,23 @@ def main():
         print(f"    Info:  /camera/{serial}/color/camera_info")
         print("")
     
-    # Start publishing thread
-    publish_thread = threading.Thread(target=publish_camera_frames, args=(manager,))
-    publish_thread.daemon = True
-    publish_thread.start()
+    # If we're using multiprocessing, we don't need to publish frames in the main process
+    if not use_multiprocessing:
+        # Start publishing thread
+        publish_thread = threading.Thread(target=lambda: publish_camera_frames(manager, args.publishing_fps))
+        publish_thread.daemon = True
+        publish_thread.start()
     
     print("\nCameras are running. Press Ctrl+C to stop...")
     
     try:
         # Keep the main thread alive
-        rospy.spin()
+        while not rospy.is_shutdown():
+            # If using multiprocessing, check if processes are still alive
+            if use_multiprocessing and not manager.are_processes_alive():
+                print("All camera processes have stopped.")
+                break
+            rospy.sleep(1.0)
     except KeyboardInterrupt:
         pass
     finally:
@@ -213,6 +216,20 @@ def main():
         print("All cameras stopped")
     
     return 0
+
+
+def publish_camera_frames(manager, rate=30):
+    """
+    Continuously publish camera frames at the specified rate.
+    
+    Args:
+        manager (CameraManager): Camera manager instance
+        rate (int): Publishing rate in Hz
+    """
+    rate_obj = rospy.Rate(rate)
+    while not rospy.is_shutdown():
+        manager.publish_frames()
+        rate_obj.sleep()
 
 
 if __name__ == "__main__":
