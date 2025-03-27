@@ -305,23 +305,15 @@ class WrenchClient:
     _controller = 'my_cartesian_force_controller'
     
     def __init__(self, path='para_net.pt', input_dim=4, force_threshold=5.0, torque_threshold=0.5):
-        self.wrench_net = load_net(path,input_dim)
+        # self.wrench_net = load_net(path,input_dim)
         self._sub_wrench = rospy.Subscriber(
             f"/robotiq_force_torque_wrench",
             WrenchStamped,
             self.wrench_callback
         )
-        # Publisher for wrench control commands
-        self._pub_wrench_difference = rospy.Publisher(
-            f"/predicted_wrench_difference",
-            WrenchStamped,
-            queue_size=1
-        )
-        
-        # Publisher for wrench control commands
-        self._pub_wrench = rospy.Publisher(
-            f"/predicted_wrench",
-            WrenchStamped,
+        self._pub_cur_pose = rospy.Publisher(
+            f"/current_pose",
+            PoseStamped,
             queue_size=1
         )
         
@@ -345,53 +337,19 @@ class WrenchClient:
                 target_frame, source_frame, rospy.Time(0)
             )
             
-            # position = Point(x=trans[0], y=trans[1], z=trans[2])
-            # orientation = Quaternion(x=rot[0], y=rot[1], z=rot[2], w=rot[3])
-        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e:
-            rospy.logerr(f"TF Error: {e}")
-            return None
-        net_input = torch.from_numpy(np.array(rot)).float()
-        predicted_wrench = self.wrench_net(net_input)
-
-        raw_force_x,raw_force_y,raw_force_z,raw_torque_tx,raw_torque_ty,raw_torque_tz = wrench_msg.wrench.force.x, wrench_msg.wrench.force.y, wrench_msg.wrench.force.z, wrench_msg.wrench.torque.x, wrench_msg.wrench.torque.y, wrench_msg.wrench.torque.z
-        
-        diff_x = predicted_wrench[0] - raw_force_x
-        diff_y = predicted_wrench[1] - raw_force_y
-        diff_z = predicted_wrench[2] - raw_force_z
-        diff_tx = predicted_wrench[3] - raw_torque_tx
-        diff_ty = predicted_wrench[4] - raw_torque_ty
-        diff_tz = predicted_wrench[5] - raw_torque_tz
-        
-        wrench_msg_difference = WrenchStamped()
-        wrench_msg_difference.header.frame_id = target_frame
-        wrench_msg_difference.header.stamp = rospy.Time.now()
-        wrench_msg_difference.wrench.force.x = diff_x
-        wrench_msg_difference.wrench.force.y = diff_y
-        wrench_msg_difference.wrench.force.z = diff_z
-        wrench_msg_difference.wrench.torque.x = diff_tx
-        wrench_msg_difference.wrench.torque.y = diff_ty
-        wrench_msg_difference.wrench.torque.z = diff_tz
-        
-        self._pub_wrench_difference.publish(wrench_msg_difference)
-        
-        
-        self.force_deque.append(np.array([diff_x,diff_y,diff_z]))
-        self.torque_deque.append(np.array([diff_tx,diff_ty,diff_tz]))
-        
-        if len(self.force_deque) > 0:
-            force_mean = np.mean(self.force_deque, axis=0)
-            torque_mean = np.mean(self.torque_deque, axis=0)
+            position = Point(x=trans[0], y=trans[1], z=trans[2])
+            orientation = Quaternion(x=rot[0], y=rot[1], z=rot[2], w=rot[3])
+            cur_pose = Pose(position=position, orientation=orientation)
+            pose_stamped = PoseStamped()
+            pose_stamped.header.frame_id = target_frame
+            pose_stamped.header.stamp = rospy.Time.now()
+            pose_stamped.pose = cur_pose
+            self._pub_cur_pose.publish(pose_stamped)
+        except (tf.Exception, tf.LookupException, tf.ConnectivityException) as e:
+            ROS_WARN(f"Error getting transform: {e}")
             
-            wrench_msg = WrenchStamped()
-            wrench_msg.header.frame_id = target_frame
-            wrench_msg.header.stamp = rospy.Time.now()
-            wrench_msg.wrench.force.x = force_mean[0] if force_mean[0]  > self.force_threshold else 0.0
-            wrench_msg.wrench.force.y = force_mean[1] if force_mean[1]  > self.force_threshold else 0.0
-            wrench_msg.wrench.force.z = force_mean[2] if force_mean[2]  > self.force_threshold else 0.0
-            wrench_msg.wrench.torque.x = torque_mean[0] if torque_mean[0]  > self.torque_threshold else 0.0
-            wrench_msg.wrench.torque.y = torque_mean[1] if torque_mean[1]  > self.torque_threshold else 0.0
-            wrench_msg.wrench.torque.z = torque_mean[2] if torque_mean[2]  > self.torque_threshold else 0.0
-            
-            self._pub_wrench.publish(wrench_msg)
-            
+if __name__ == "__main__":
+    rospy.init_node("ur5_comp_control")
+    wrench_client = WrenchClient()
+    rospy.spin()
     

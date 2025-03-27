@@ -8,6 +8,10 @@ from copy import deepcopy
 from pathlib import Path
 from threading import Thread
 from typing import Callable
+import sys
+import termios
+import tty
+import select
 
 import cv2
 import message_filters
@@ -27,6 +31,34 @@ from std_msgs.msg import Float32MultiArray
 from ur5_sensor.msg import StampedFloat32MultiArray
 
 bridge = CvBridge()
+
+class KeyboardReader:
+    def __init__(self):
+        self.is_running = True
+        self.last_key = None
+        self.thread = Thread(target=self._read_keys)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def _read_keys(self):
+        old_settings = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            while self.is_running:
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    self.last_key = sys.stdin.read(1)
+                time.sleep(0.1)
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+    def get_last_key(self):
+        key = self.last_key
+        self.last_key = None
+        return key
+
+    def stop(self):
+        self.is_running = False
+        self.thread.join()
 
 class UR5TrajRecorder:
     def __init__(self, freq=30, 
@@ -413,32 +445,58 @@ class CmdlineListener:
                  stop_fn: Callable,
                  gohome_fn: Callable
                  ):
+        self.key_reader = KeyboardReader()
         self.input_thread = Thread(target=self._listener)
+        self.input_thread.daemon = True
         self.input_thread.start()
         self.start_fn = start_fn
         self.save_fn = save_fn
         self.stop_fn = stop_fn
         self.gohome_fn = gohome_fn
+        self.is_running = True
+        
+        # Print instructions
+        self.print_instructions()
+        
+    def print_instructions(self):
+        print("\n===== UR5 Trajectory Recorder Instructions =====")
+        print("Press 's' to START recording")
+        print("Press 'e' to END recording and save the demonstration")
+        print("Press 'q' to quit the program")
+        print("Press 'g' to go to home position")
+        print("Press 'h' to show these instructions again")
+        print("=========================================\n")
 
     def _listener(self):
-        while True:
-            command = input("Enter command for Traj Recorder: ")
-            if command == 's':
+        while self.is_running:
+            key = self.key_reader.get_last_key()
+            if key == 's':
                 print("========== Start Recording ==============")
                 self.start_fn()
-            elif command == 'e':
+            elif key == 'e':
                 print("========== Save Recording ==============")
                 self.save_fn()
-            elif command == 'q':
+            elif key == 'q':
                 print("========== Stop Recording ==============")
-                is_compressed = input("Compress the file? (y/n): ")
-                is_compressed = True if is_compressed == 'y' else False
-                self.stop_fn(compress=is_compressed)  # 停止时压缩文件
-            elif command == 'g':
+                print("Compress the file? (y/n)")
+                # Wait for compression response
+                compression_response = None
+                while compression_response not in ['y', 'n']:
+                    compression_response = self.key_reader.get_last_key()
+                    time.sleep(0.1)
+                    
+                is_compressed = True if compression_response == 'y' else False
+                print(f"Compressing: {is_compressed}")
+                self.stop_fn(compress=is_compressed)
+                self.is_running = False
+                self.key_reader.stop()
+            elif key == 'g':
                 print("========== Go Home ==============")
                 self.gohome_fn()
-            
-
+            elif key == 'h':
+                self.print_instructions()
+                
+            time.sleep(0.1)  # Short sleep to prevent CPU hogging
 
 def call_gohomepose_srv():
     from ur5_twist_control.srv import GoHomePose
@@ -466,17 +524,26 @@ if __name__ == '__main__':
         record_tactile=True,
         save_path=fpath
     )
-    print('started recording!')
+    print('Started trajectory recorder!')
+    
     listener = CmdlineListener(
         start_fn=traj_recorder.start_record,
-        save_fn=lambda: traj_recorder.save_states(compress=False),  # 保存时不压缩
+        save_fn=lambda: traj_recorder.save_states(compress=False),
         stop_fn=traj_recorder.stop,
         gohome_fn=call_gohomepose_srv
     )
 
-    while not rospy.is_shutdown():
-        traj_recorder.record()
-        traj_recorder.rate.sleep()
-
-    rospy.spin()
+    try:
+        while not rospy.is_shutdown():
+            traj_recorder.record()
+            traj_recorder.rate.sleep()
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt detected. Shutting down...")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        # Ensure proper cleanup
+        if hasattr(listener, 'key_reader'):
+            listener.key_reader.stop()
+        print("Trajectory recorder stopped.")
 
