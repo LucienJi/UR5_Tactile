@@ -11,7 +11,7 @@ import time
 import yaml
 import rospy
 import threading
-from .ur5_camera_calib.camera_manager import CameraManager, save_camera_layout, load_camera_layout
+from ur5_camera_calib.camera_manager import CameraManager, save_camera_layout, load_camera_layout
 
 
 def identify_and_name_cameras(manager):
